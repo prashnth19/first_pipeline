@@ -6,11 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
-type SyftDocument struct {
+type SyftOutput struct {
 	Artifacts []struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
@@ -22,116 +21,138 @@ type Dependency struct {
 	GroupID    string
 	ArtifactID string
 	Version    string
-	Scope      string
+	Scope      string // "compile" or "test"
+	Key        string // group:artifact to deduplicate
 }
 
-func main() {
-	projectDir := "./" // change or pass via os.Args[1]
+func runSyftJar(path string) (Dependency, error) {
+	cmd := exec.Command("syft", path, "-o", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		return Dependency{}, fmt.Errorf("syft failed on %s: %v", path, err)
+	}
 
-	var jarFiles []string
-	err := filepath.Walk(projectDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(info.Name(), ".jar") {
-			jarFiles = append(jarFiles, path)
+	var result SyftOutput
+	if err := json.Unmarshal(output, &result); err != nil {
+		return Dependency{}, fmt.Errorf("invalid syft output: %v", err)
+	}
+
+	if len(result.Artifacts) == 0 {
+		return Dependency{}, fmt.Errorf("no metadata found in: %s", path)
+	}
+
+	a := result.Artifacts[0]
+	groupID := "unknown.group"
+	if strings.HasPrefix(a.PURL, "pkg:maven/") {
+		parts := strings.Split(a.PURL, "/")
+		if len(parts) >= 2 {
+			groupID = parts[1]
+		}
+	}
+
+	scope := "compile"
+	if strings.Contains(path, "/test/") || strings.Contains(strings.ToLower(filepath.Base(path)), "test-") {
+		scope = "test"
+	}
+
+	dep := Dependency{
+		GroupID:    groupID,
+		ArtifactID: a.Name,
+		Version:    a.Version,
+		Scope:      scope,
+		Key:        groupID + ":" + a.Name,
+	}
+
+	return dep, nil
+}
+
+func findJarFiles(root string) ([]string, error) {
+	var jars []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".jar") {
+			jars = append(jars, path)
 		}
 		return nil
 	})
-	if err != nil {
-		panic(err)
+	return jars, err
+}
+
+func generatePom(dependencies []Dependency) string {
+	builder := strings.Builder{}
+	builder.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>generated</groupId>
+  <artifactId>sbom-project</artifactId>
+  <version>1.0.0</version>
+
+  <dependencies>
+`)
+
+	for _, dep := range dependencies {
+		builder.WriteString(fmt.Sprintf("    <dependency>\n"))
+		builder.WriteString(fmt.Sprintf("      <groupId>%s</groupId>\n", dep.GroupID))
+		builder.WriteString(fmt.Sprintf("      <artifactId>%s</artifactId>\n", dep.ArtifactID))
+		builder.WriteString(fmt.Sprintf("      <version>%s</version>\n", dep.Version))
+		if dep.Scope == "test" {
+			builder.WriteString("      <scope>test</scope>\n")
+		}
+		builder.WriteString("    </dependency>\n")
 	}
 
-	dependencies := make([]Dependency, 0)
+	builder.WriteString(`  </dependencies>
+</project>
+`)
+	return builder.String()
+}
+
+func main() {
+	projectDir := "."
+
+	jarFiles, err := findJarFiles(projectDir)
+	if err != nil {
+		fmt.Println("Error finding jars:", err)
+		return
+	}
+
+	seen := make(map[string]bool)
+	var dependencies []Dependency
 
 	for _, jar := range jarFiles {
-		// Run syft -o json <jar>
-		cmd := exec.Command("syft", jar, "-o", "json")
-		output, err := cmd.Output()
+		dep, err := runSyftJar(jar)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to scan %s: %v\n", jar, err)
+			fmt.Printf("Skipping %s: %v\n", jar, err)
 			continue
 		}
-
-		var doc SyftDocument
-		err = json.Unmarshal(output, &doc)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to parse syft output: %v\n", err)
-			continue
-		}
-
-		for _, art := range doc.Artifacts {
-			if art.PURL == "" {
-				continue
-			}
-
-			groupID, artifactID, version := parsePurl(art.PURL)
-			if groupID == "" || artifactID == "" || version == "" {
-				continue
-			}
-
-			scope := "compile"
-			lower := strings.ToLower(jar)
-			if strings.Contains(lower, "/test/") || strings.Contains(lower, "\\test\\") || strings.Contains(lower, "test-") {
-				scope = "test"
-			}
-
-			dep := Dependency{
-				GroupID:    groupID,
-				ArtifactID: artifactID,
-				Version:    version,
-				Scope:      scope,
-			}
+		if !seen[dep.Key] {
 			dependencies = append(dependencies, dep)
+			seen[dep.Key] = true
 		}
 	}
 
-	generatePom(dependencies)
-}
+	if len(dependencies) == 0 {
+		fmt.Println("No valid dependencies found.")
+		return
+	}
 
-func parsePurl(purl string) (string, string, string) {
-	// Example: pkg:maven/org.apache.commons/commons-lang3@3.12.0
-	if !strings.HasPrefix(purl, "pkg:maven/") {
-		return "", "", ""
-	}
-	purl = strings.TrimPrefix(purl, "pkg:maven/")
-	parts := strings.SplitN(purl, "@", 2)
-	if len(parts) != 2 {
-		return "", "", ""
-	}
-	coords := strings.Split(parts[0], "/")
-	if len(coords) != 2 {
-		return "", "", ""
-	}
-	return coords[0], coords[1], parts[1]
-}
+	pomContent := generatePom(dependencies)
 
-func generatePom(deps []Dependency) {
-	f, err := os.Create("generated-pom.xml")
+	err = os.WriteFile("generated-pom.xml", []byte(pomContent), 0644)
 	if err != nil {
-		panic(err)
-	}
-	defer f.Close()
-
-	f.WriteString("<project xmlns=\"http://maven.apache.org/POM/4.0.0\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n")
-	f.WriteString("         xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0\n")
-	f.WriteString("                             http://maven.apache.org/xsd/maven-4.0.0.xsd\">\n")
-	f.WriteString("  <modelVersion>4.0.0</modelVersion>\n")
-	f.WriteString("  <groupId>generated</groupId>\n")
-	f.WriteString("  <artifactId>sbom-artifact</artifactId>\n")
-	f.WriteString("  <version>1.0.0</version>\n")
-	f.WriteString("  <dependencies>\n")
-
-	for _, d := range deps {
-		f.WriteString("    <dependency>\n")
-		f.WriteString(fmt.Sprintf("      <groupId>%s</groupId>\n", d.GroupID))
-		f.WriteString(fmt.Sprintf("      <artifactId>%s</artifactId>\n", d.ArtifactID))
-		f.WriteString(fmt.Sprintf("      <version>%s</version>\n", d.Version))
-		if d.Scope != "compile" {
-			f.WriteString(fmt.Sprintf("      <scope>%s</scope>\n", d.Scope))
-		}
-		f.WriteString("    </dependency>\n")
+		fmt.Println("Failed to write generated-pom.xml:", err)
+		return
 	}
 
-	f.WriteString("  </dependencies>\n")
-	f.WriteString("</project>\n")
+	// Rename to pom.xml
+	err = os.Rename("generated-pom.xml", "pom.xml")
+	if err != nil {
+		fmt.Println("Failed to rename generated-pom.xml to pom.xml:", err)
+		return
+	}
 
-	fmt.Println("✅ generated-pom.xml created with", len(deps), "dependencies.")
+	fmt.Println("✅ pom.xml has been successfully generated from .jar files.")
 }
