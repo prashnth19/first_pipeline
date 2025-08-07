@@ -1,0 +1,4 @@
+chmod +x unpack_archives.sh
+./unpack_archives.sh /path/to/project
+
+This will unpack all archives into sibling folders. Now ORT can discover more license info from these unpacked contents.
