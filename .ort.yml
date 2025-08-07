@@ -1,0 +1,40 @@
+analyzer:
+  allowDynamicVersions: true
+  enabledPackageManagers:
+    - Gradle
+    - Maven
+    - NPM
+    - PIP
+    - GoMod
+    - SBT
+    - DotNet
+    - Conan
+    - Cargo
+    - Composer
+    - Pub
+    - Poetry
+    - Stack
+    - Bundler
+
+scanner:
+  archive:
+    fileExtensions:
+      - ".zip"
+      - ".rar"
+      - ".jar"
+    enabled: true
+
+  ignorePatterns:
+    - "**/test/**"
+    - "**/__pycache__/**"
+    - "**/node_modules/**"
+
+reporter:
+  enabledReporters:
+    - WebApp
+    - StaticHtml
+    - SpdxDocument
+    - CycloneDx
+    - NoticeByPackage
+    - NoticeSummary
+    - OrtResult
