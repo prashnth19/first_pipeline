@@ -2,3 +2,75 @@ chmod +x unpack_archives.sh
 ./unpack_archives.sh /path/to/project
 
 This will unpack all archives into sibling folders. Now ORT can discover more license info from these unpacked contents.
+
+
+
+✅ How to Use It
+Install 7-Zip and ensure it's added to your system PATH.
+
+Save the script above as unpack-archives.ps1.
+
+Open PowerShell, navigate to your project folder:
+
+powershell
+Copy
+Edit
+cd "C:\Users\YourName\path\to\project"
+Run the script:
+
+powershell
+Copy
+Edit
+.\unpack-archives.ps1
+Or specify a folder:
+
+powershell
+Copy
+Edit
+.\unpack-archives.ps1 "C:\Users\YourName\my-java-project"
+✅ Example After Extraction
+plaintext
+Copy
+Edit
+my-java-project\
+├── lib1.jar
+├── lib1_extracted\
+│   ├── META-INF\
+│   └── com\
+├── archive.zip
+├── archive_extracted\
+│   └── ...
+✅ Then Run ORT on Same Directory
+bash
+Copy
+Edit
+docker run --rm -v C:\Users\YourName\my-java-project:/project ^
+  ghcr.io/oss-review-toolkit/ort:latest ^
+  scan -i /project -o /project/ort-output
+Let me know if you want this script to delete the archives after extraction, or also scan for nested archives.
+
+You're right to ask — since you're on Windows using PowerShell, you do not need to run chmod +x unpack_archives.sh.
+
+That command is for Linux/macOS to make the script executable. On Windows with PowerShell, you can simply run the script with:
+
+powershell
+Copy
+Edit
+bash ./unpack_archives.sh
+✅ Pre-requisites:
+
+You must have Git Bash or WSL (Windows Subsystem for Linux) installed — otherwise PowerShell won’t recognize bash.
+
+If you're using Git Bash, just right-click in the folder and choose “Git Bash Here” and run:
+
+bash
+Copy
+Edit
+./unpack_archives.sh
+If you’re using PowerShell with WSL, then use:
+
+powershell
+Copy
+Edit
+wsl bash ./unpack_archives.sh
+Or alternatively, convert the logic to PowerShell itself — let me know if you want the native .ps1 version of the unpacking script.
